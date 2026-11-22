@@ -2,7 +2,7 @@
 
 Plataforma de datos de punta a punta para ElectroCasa, una cadena de electrodomésticos con 40 sucursales en Perú. Integra seis fuentes más la tabla de sucursales en un lakehouse medallion sobre Databricks (Unity Catalog, Lakeflow Spark Declarative Pipelines, Lakeflow Connect, Lakeflow Jobs y Declarative Automation Bundles) y responde las seis preguntas de negocio de marzo a octubre de 2026.
 
-> **Estado:** ejecutado de punta a punta en Databricks Free Edition (target `dev`) con los tres lotes. Las capturas están en [`evidencias/`](evidencias/) y reunidas con su explicación en `evidencias/Evidencias_ElectroCasa_Lakehouse.docx`. Solo queda pendiente la evidencia de auditoría (`system.access`), marcada con `[EVIDENCIA]`.
+> **Estado:** ejecutado de punta a punta en Databricks Free Edition (target `dev`) con los tres lotes. Las capturas están en [`evidencias/`](evidencias/) y reunidas con su explicación en `evidencias/Evidencias_ElectroCasa_Lakehouse.docx`.
 
 ## 1. Caso y arquitectura
 
@@ -229,7 +229,9 @@ Las reingestas no duplican filas: tras el lote 3, `silver.ventas` tiene 17,488 `
 
 **Pendiente de captura:**
 
-* **Auditoría:** `[EVIDENCIA]` salida de la sección 3b de `00_setup.ipynb`: los `GRANT` sobre `system.access` (o su error, esperado en Free Edition).
+* **Auditoría:** la sección 3b de `00_setup.ipynb` intenta otorgar a `electrocasa_auditoria` el acceso a `system.access` (`audit`, `table_lineage`, `column_lineage`). En Free Edition falla con `PRINCIPAL_DOES_NOT_EXIST` (no se pueden crear grupos y no hay permisos sobre `system`); el error queda impreso y la evidencia de trazabilidad se muestra en la pestaña Lineage del Catalog Explorer.
+
+![Auditoría system.access](evidencias/27_auditoria_system_access.png)
 
 ## 9. Retos opcionales implementados
 
