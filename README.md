@@ -2,7 +2,7 @@
 
 Plataforma de datos de punta a punta para ElectroCasa, una cadena de electrodomésticos con 40 sucursales en Perú. Integra seis fuentes más la tabla de sucursales en un lakehouse medallion sobre Databricks (Unity Catalog, Lakeflow Spark Declarative Pipelines, Lakeflow Connect, Lakeflow Jobs y Declarative Automation Bundles) y responde las seis preguntas de negocio de marzo a octubre de 2026.
 
-> **Estado:** el código está escrito y validado en sintaxis. Las secciones marcadas con `[EVIDENCIA]` se completan con capturas o logs de tu ejecución en Databricks.
+> **Estado:** ejecutado de punta a punta en Databricks Free Edition (target `dev`) con los tres lotes. Las capturas están en [`evidencias/`](evidencias/) y reunidas con su explicación en `evidencias/Evidencias_ElectroCasa_Lakehouse.docx`. Los puntos marcados con `[EVIDENCIA]` están pendientes de captura.
 
 ## 1. Caso y arquitectura
 
@@ -140,28 +140,77 @@ Si no logras crear los grupos (Free Edition): en `00_setup.ipynb` pon `USAR_GRUP
 | sucursales | 40 | — | — |
 | tracking | 15,139 (una carga) | — | — |
 
-**Silver acumulado (valores esperados, calculados con Python sobre los archivos de datos con las mismas reglas del pipeline).** Compáralos con la columna *Real* que salga de `default.log_conteos`.
+**Silver y rechazos (conteos reales de `validacion_calidad`, tras cada lote)**
 
-| Tabla | Después del lote 1 (esperado / real) | Después del lote 2 | Después del lote 3 |
+| Tabla (válidas / rechazadas) | Después del lote 1 | Después del lote 2 | Después del lote 3 |
 |---|---|---|---|
-| `silver.ventas` / `ventas_rechazos` | 6,604 / 179 · `[EVIDENCIA]` | 13,118 / 504 · `[EVIDENCIA]` | 17,488 / 752 · `[EVIDENCIA]` |
-| `silver.devoluciones` / `devoluciones_rechazos` | 1,301 / 86 · `[EVIDENCIA]` | 2,877 / 214 · `[EVIDENCIA]` | 3,908 / 309 · `[EVIDENCIA]` |
-| `silver.empleados` (versiones) / `empleados_rechazos` | 2,239 / 18 · `[EVIDENCIA]` | 3,495 / 29 · `[EVIDENCIA]` | 4,410 / 38 · `[EVIDENCIA]` |
-| `silver.resenas` / `resenas_rechazos` | 5,226 / 66 · `[EVIDENCIA]` | 9,097 / 183 · `[EVIDENCIA]` | (sin lote 3) |
-| `silver.catalogo` / `catalogo_rechazos` | 2,238 / 42 · `[EVIDENCIA]` | 2,349 / 51 · `[EVIDENCIA]` | — |
-| `silver.sucursales` | 40 · `[EVIDENCIA]` | — | — |
+| `silver.ventas` / `ventas_rechazos` | 6,604 / 179 | 13,118 / 504 | 17,488 / 752 |
+| `silver.devoluciones` / `devoluciones_rechazos` | 1,301 / 86 | 2,877 / 214 | 3,908 / 309 |
+| `silver.empleados` (versiones) / `empleados_rechazos` | 2,239 / 18 | 3,495 / 29 | 4,410 / 38 |
+| `silver.resenas` / `resenas_rechazos` | 5,226 / 66 | 5,226 / 66 | 9,097 / 183 |
+| `silver.catalogo` / `catalogo_rechazos` | 2,238 / 42 | 2,349 / 51 | 2,349 / 51 |
+| `silver.sucursales` / `sucursales_rechazos` | 40 / 0 | 40 / 0 | 40 / 0 |
+| `silver.tracking_envios` / `tracking_envios_rechazos` | 5,731 / 9,321 | 11,106 / 3,946 | 14,637 / 415 |
 
-Las reingestas no duplican filas: tras el lote 3, `silver.ventas` tiene 17,488 `venta_id` distintos de los 18,000 únicos del origen (los 512 restantes están en rechazos). Los eventos de llegada tardía de Empleados quedan en su lugar cronológico del SCD2.
+En cada fuente, válidas + rechazadas igualan al Bronze acumulado (por ejemplo, ventas tras el lote 3: 17,488 + 752 = 18,240 = 6,783 + 6,839 + 4,618). Las excepciones se explican por diseño:
+
+* **Catálogo:** 2,238 + 42 = 2,280 frente a 2,305 en Bronze porque 25 productos del snapshot de marzo venían repetidos y quedan una sola vez. En el lote 2 el snapshot de agosto (2,400 = 2,349 + 51) pasa a ser el vigente.
+* **Tracking:** los rechazos bajan de 9,321 a 415 a medida que se cargan las ventas a las que apuntan los eventos (la regla `venta_existe` se reevalúa en cada corrida). Silver + rechazos suma 15,052 frente a 15,139 en Bronze: 87 eventos repetidos quedan una sola vez.
+
+Las reingestas no duplican filas: tras el lote 3, `silver.ventas` tiene 17,488 `venta_id` distintos de los 18,000 únicos del origen (los 512 restantes fallaron alguna regla y están en rechazos; los otros 240 de los 752 son repeticiones del lote anterior). Los eventos de llegada tardía de Empleados quedan en su lugar cronológico del SCD2.
+
+**Gold (filas por tabla)**
+
+| Tabla | Lote 1 | Lote 2 | Lote 3 |
+|---|---:|---:|---:|
+| `ventas_netas_sucursal_mes` | 120 | 240 | 320 |
+| `top_productos_unidades` | 10 | 10 | 10 |
+| `top_productos_tasa_devolucion` | 10 | 10 | 10 |
+| `dotacion_mensual` | 320 | 320 | 320 |
+| `empleados_vigentes` | 1,102 | 1,161 | 1,138 |
+| `ventas_por_vendedor` | 2,011 | 4,081 | 5,505 |
+| `resenas_negativas_categoria_mes` | 25 | 25 | 40 |
+| `metricas_despachos_courier` | 4 | 4 | 4 |
+| `resenas_por_origen_metadata` | 11 | 11 | 11 |
+
+**Capturas de los conteos**
+
+| Lote | Bronze | Silver y rechazos | Gold |
+|---|---|---|---|
+| 1 | ![](evidencias/01_lote1_bronze.png) | ![](evidencias/02_lote1_silver.png) | ![](evidencias/03_lote1_gold.png) |
+| 2 | ![](evidencias/04_lote2_bronze.png) | ![](evidencias/05_lote2_silver.png) | ![](evidencias/06_lote2_gold.png) |
+| 3 | ![](evidencias/07_lote3_bronze.png) | ![](evidencias/08_lote3_silver.png) | ![](evidencias/09_lote3_gold.png) |
 
 ## 8. Evidencia de ejecución
 
-* **Tracking, dos corridas del conector:** `[EVIDENCIA]` `DESCRIBE HISTORY <catalogo>.bronze.tracking_envios`: la primera corrida carga los 15,139 eventos y la segunda no agrega filas nuevas.
-* **Pipeline y job ejecutados:** `[EVIDENCIA]` captura del grafo del pipeline y de la corrida del job con sus cuatro tareas en verde.
-* **Despliegue del bundle:** `[EVIDENCIA]` salida de `databricks bundle validate` y `deploy` (o panel Deployments / extensión de VS Code).
-* **Monitoreo:** `[EVIDENCIA]` consulta al event log del pipeline, por ejemplo `SELECT timestamp, event_type, message FROM event_log(TABLE(<catalogo>.silver.ventas))`, o al historial de corridas del job. Si `system.lakeflow` o `system.billing` no están disponibles, pega aquí el error y usa el event log o el historial del job en la interfaz.
-* **REVOKE:** `[EVIDENCIA]` `SHOW GRANTS ON SCHEMA <catalogo>.silver` antes y después de revocar `SELECT` a `electrocasa_analistas` (lo imprime `00_setup.ipynb`).
-* **Auditoría:** `[EVIDENCIA]` error de los `GRANT` sobre `system.access` (esperado en Free Edition) y captura de la pestaña Lineage en Catalog Explorer.
-* **Masking:** `[EVIDENCIA]` `SELECT dni, salario FROM <catalogo>.gold.empleados_vigentes` ejecutada por un miembro de `electrocasa_ingenieria` (valores reales) y por otro usuario (`****NNNN` y `NULL`).
+**Job ejecutado con sus cuatro tareas en verde** (`copy_into_bronze` → `ingest_tracking` → `medallion_pipeline` → `validacion_calidad`):
+
+![Corrida del job](evidencias/10_job_corrida_exitosa.png)
+
+**Historial de corridas** (las dos primeras fallaron por el error de comillas descrito en la sección 10; después, una corrida por lote; la de las 5:25 PM la disparó el trigger por llegada de archivos):
+
+![Historial de corridas](evidencias/11_job_historial_corridas.png)
+
+**Despliegue del bundle** al target `dev` desde el panel Deployments (`Deployment complete`):
+
+![Deploy del bundle](evidencias/12_bundle_deploy_dev.png)
+
+**REVOKE** (`SHOW GRANTS ON SCHEMA electrocasa_dev.silver` antes y después; Free Edition no permite crear los grupos, así que la demostración se hizo con el usuario del workspace):
+
+![REVOKE antes](evidencias/13_revoke_antes.png)
+![REVOKE después](evidencias/14_revoke_despues.png)
+
+**Grupos de cuenta no disponibles en Free Edition** (`PRINCIPAL_DOES_NOT_EXIST` al conceder permisos a los tres grupos; el setup imprime el error y continúa):
+
+![Error de grupos](evidencias/15_grupos_inexistentes_error.png)
+
+**Pendientes de captura:**
+
+* **Tracking, dos corridas del conector:** `[EVIDENCIA]` `DESCRIBE HISTORY <catalogo>.bronze.tracking_envios`: la primera corrida carga los 15,139 eventos y las siguientes no agregan filas nuevas.
+* **Grafo del pipeline:** `[EVIDENCIA]` pipeline `electrocasa-medallion` con sus tablas.
+* **Monitoreo:** `[EVIDENCIA]` consulta al event log del pipeline, por ejemplo `SELECT timestamp, event_type, message FROM event_log(TABLE(<catalogo>.silver.ventas))`, o al historial de corridas del job (ya incluido arriba). Si `system.lakeflow` o `system.billing` no están disponibles, pega aquí el error.
+* **Auditoría:** `[EVIDENCIA]` error de los `GRANT` sobre `system.access` (esperado en Free Edition) y pestaña Lineage en Catalog Explorer.
+* **Masking:** `[EVIDENCIA]` `SELECT dni, salario FROM <catalogo>.gold.empleados_vigentes` con valores reales (usuario autorizado) y enmascarados (`****NNNN` y `NULL`).
 
 ## 9. Retos opcionales implementados
 
@@ -170,7 +219,10 @@ Las reingestas no duplican filas: tras el lote 3, `silver.ventas` tiene 17,488 `
 
 ## 10. Supuestos y limitaciones
 
-* **No se ejecutó en Databricks desde donde se escribió el código.** Validé la sintaxis de Python, YAML y notebooks y calculé offline los conteos esperados; la ejecución real puede revelar ajustes (por ejemplo, la configuración del conector query-based, que es reciente: `databricks bundle validate` confirma los campos según tu versión de CLI).
+* **Ejecución real en Free Edition:** el proyecto se ejecutó con los tres lotes en el target `dev`. No se ejecutó el target `prod`.
+* **Grupos de cuenta:** Free Edition no permite crearlos, así que los `GRANT` por grupo fallan con `PRINCIPAL_DOES_NOT_EXIST`. La demostración de `REVOKE` y la máscara de `dni` y `salario` usan el usuario del workspace (`USAR_GRUPO_EN_MASCARA = False`); con grupos reales basta dejar el flag en `True`.
+* **Incidencia con `COPY INTO`:** las dos primeras corridas del job fallaron con `PARSE_SYNTAX_ERROR` porque Spark SQL absorbía las comillas dobles (`''`) dentro del texto del `EXECUTE IMMEDIATE`. Se corrigió con comillas escapadas (`\'`); el detalle está en `evidencias/17_incidencia_copy_into_error.png`.
+* **Incidencia con la Connection:** el primer deploy falló porque la Connection de Unity Catalog aún no existía; se creó (`conn_azure_sql_electrocasa`, SQL Server, base `electrocasadb`) y se repitió el deploy. Las credenciales viven solo en la Connection.
 * **Estados de tracking:** el mapa reconoce `pendiente`, `en_transito` (incluye `en camino`), `entregado` y `devuelto`. Si el `SELECT DISTINCT estado_entrega` de Bronze muestra otra variante, se agrega en `cleaning.normalizar_estado_envio`; mientras tanto va a `tracking_envios_rechazos`.
 * **Baja con fecha nula:** una baja rechazada por no tener `fecha_evento` deja al empleado activo en Gold (3 casos en los datos).
 * **Tasa de devolución:** por producto, devoluciones / ventas, sin umbral mínimo de ventas; un producto con pocas ventas puede quedar arriba.
