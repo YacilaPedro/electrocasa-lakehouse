@@ -1,0 +1,71 @@
+fuente: catalogo
+version: "1.0"
+ultima_actualizacion: "2026-11-19"
+responsable: "Equipo de Ingeniería de Datos ElectroCasa"
+llegada: "/Volumes/<catalogo>/default/vol_landing/catalogo/ (JSON multilínea, 2 snapshots: marzo 2,305 filas y agosto 2,400 filas)"
+metodo_ingesta: "COPY INTO (FILEFORMAT = JSON, multiLine = true, primitivesAsString = true) desde la tarea SQL copy_into_bronze del job"
+frecuencia_esperada: "Snapshot completo ocasional (marzo y agosto); el job se dispara por llegada de archivo"
+tipo_entrega: "Snapshot completo (cada archivo contiene el catálogo entero)"
+tabla_bronze: "<catalogo>.bronze.catalogo"
+tabla_silver: "<catalogo>.silver.catalogo"
+llave: [producto_id]
+historizacion: "Ninguna (SCD1 por snapshot): gana el snapshot más reciente en el que aparece el producto (Q5 usa esa categoría). Los productos descontinuados (activo = false) se conservan marcados."
+
+columnas:
+  - {nombre: producto_id, tipo: STRING, nulo: false}
+  - {nombre: nombre_producto, tipo: STRING, nulo: true}
+  - {nombre: categoria, tipo: STRING, nulo: true, valores_permitidos: ["Cocina", "Electrónica", "Línea blanca", "Climatización", "Entretenimiento"]}
+  - {nombre: marca, tipo: STRING, nulo: false, regla: "Nula en origen -> 'Sin marca'"}
+  - {nombre: precio_lista, tipo: "DECIMAL(12,2)", nulo: false, regla: "precio_lista IS NOT NULL AND precio_lista > 0"}
+  - {nombre: activo, tipo: BOOLEAN, nulo: true, regla: "Se conservan los false (60 productos descontinuados)"}
+  - {nombre: _source_file, tipo: STRING, nulo: true}
+  - {nombre: _batch_id, tipo: STRING, nulo: true}
+
+reglas_de_calidad:
+  - nombre: producto_id_no_nulo
+    condicion: "producto_id IS NOT NULL"
+    politica: drop
+    destino_rechazos: "<catalogo>.silver.catalogo_rechazos"
+    justificacion: "Sin llave no se puede resolver el snapshot vigente ni cruzar con ventas y reseñas."
+  - nombre: precio_lista_positivo
+    condicion: "precio_lista IS NOT NULL AND precio_lista > 0"
+    politica: drop
+    destino_rechazos: "<catalogo>.silver.catalogo_rechazos"
+    justificacion: "Un precio nulo o <= 0 no es un precio de lista válido (42 en marzo, 51 tras agosto)."
+
+transformaciones_silver:
+  - "Deduplicación por producto_id: snapshot más reciente (agosto sobre marzo); dentro del snapshot, precio válido primero y luego el último registro leído."
+  - "precio_lista: limpieza de moneda y separadores (\"S/ 1,474.75\" -> 1474.75) a DECIMAL(12,2)."
+  - "categoria: 17 variantes -> Cocina, Electrónica, Línea blanca, Climatización, Entretenimiento."
+  - "marca: nula -> 'Sin marca' (46 en marzo, 48 en agosto)."
+  - "activo: cast a BOOLEAN conservando los false."
+
+problemas_conocidos:
+  - problema: "producto_id duplicado dentro del snapshot de marzo"
+    ejemplo: "25 producto_id repetidos intra-archivo; en 24 pares solo cambia precio_lista y 1 par es idéntico"
+    filas_afectadas: 25
+    tratamiento: "Se conserva el registro con precio válido y, si persiste el empate, el último en orden de lectura. El conteo de precios inválidos (42) no depende del orden."
+  - problema: "Mismo producto en dos snapshots"
+    ejemplo: "2,305 filas en marzo y 2,400 en agosto"
+    filas_afectadas: "Todo el catálogo de marzo"
+    tratamiento: "Gana el snapshot de agosto; el de marzo queda solo como historia en bronze."
+  - problema: "precio_lista con símbolo de moneda y separador de miles"
+    ejemplo: "S/ 1,474.75"
+    filas_afectadas: "Todas las filas"
+    tratamiento: "Limpieza y cast a DECIMAL(12,2)."
+  - problema: "precio_lista nulo o <= 0"
+    ejemplo: "NULL o 0"
+    filas_afectadas: "42 en marzo (tras deduplicar; 43 por fila: 12 nulos, 31 <= 0) y 51 en agosto (24 nulos, 27 <= 0)"
+    tratamiento: "Rechazo (precio_lista_positivo)."
+  - problema: "categoria con 17 variantes de escritura"
+    ejemplo: "COCINA, cocina, Linea blanca, linea_blanca, LINEA BLANCA, Climatizacion, ELECTRONICA..."
+    filas_afectadas: "Todas las filas"
+    tratamiento: "Normalización a 5 categorías."
+  - problema: "marca nula"
+    ejemplo: "NULL"
+    filas_afectadas: "46 en marzo; 48 en agosto"
+    tratamiento: "Imputación a 'Sin marca'."
+  - problema: "Productos descontinuados"
+    ejemplo: "activo: false"
+    filas_afectadas: 60
+    tratamiento: "Se conservan con activo = false para no perder historial de ventas y reseñas."

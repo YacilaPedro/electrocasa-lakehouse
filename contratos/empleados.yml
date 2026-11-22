@@ -1,0 +1,93 @@
+fuente: empleados
+version: "1.0"
+ultima_actualizacion: "2026-11-19"
+responsable: "Equipo de Ingeniería de Datos ElectroCasa"
+llegada: "/Volumes/<catalogo>/default/vol_landing/empleados/ (CSV, 3 lotes: 2,257 / 1,267 / 924 = 4,448 eventos de 1,500 id_empleado)"
+metodo_ingesta: "Auto Loader (cloudFiles, CSV con StructType explícito) en Streaming Table del pipeline + AUTO CDC hacia silver.empleados"
+frecuencia_esperada: "Por lotes; el job se dispara por llegada de archivo al volume"
+tabla_bronze: "<catalogo>.bronze.empleados"
+tabla_silver: "<catalogo>.silver.empleados"
+llave_evento: [id_empleado, fecha_evento, fecha_registro]
+llave_entidad: [id_empleado]
+
+historizacion:
+  tipo: "SCD Type 2"
+  implementacion: "dp.create_auto_cdc_flow(target='silver.empleados', source='empleados_limpios', keys=['id_empleado'], sequence_by=struct(fecha_evento, fecha_registro), stored_as_scd_type=2)"
+  columnas_de_vigencia: ["__START_AT", "__END_AT"]
+  orden_de_los_cambios: "struct(fecha_evento, fecha_registro): primero por fecha_evento y luego por fecha_registro. Nunca current_timestamp()."
+  eventos_mismo_dia: "38 pares (id_empleado, fecha_evento) con 2 eventos el mismo día: desempata fecha_registro dentro del struct."
+  llegada_tardia: "63 eventos de llegada tardía en el lote 3 (fecha_evento entre junio y agosto, registrados en septiembre u octubre): AUTO CDC los reubica en su posición cronológica y recalcula __END_AT de la versión anterior."
+
+columnas:
+  - {nombre: id_empleado, tipo: STRING, nulo: false}
+  - {nombre: nombre, tipo: STRING, nulo: true}
+  - {nombre: dni, tipo: STRING, nulo: true, sensible: true, masking: "MASK <catalogo>.silver.mask_dni: valor real solo para electrocasa_ingenieria; el resto ve '****' || right(dni, 4)"}
+  - {nombre: email, tipo: STRING, nulo: true}
+  - {nombre: salario, tipo: "DECIMAL(12,2)", nulo: true, sensible: true, masking: "MASK <catalogo>.silver.mask_salario: valor real solo para electrocasa_ingenieria (is_account_group_member); el resto ve NULL", regla: "Si salario > 50000 se divide entre 100 antes de castear"}
+  - {nombre: sucursal_id, tipo: STRING, nulo: true}
+  - {nombre: cargo, tipo: STRING, nulo: true}
+  - {nombre: tipo_evento, tipo: STRING, nulo: false, valores_permitidos: ["alta", "transferencia", "cambio_salario", "baja"]}
+  - {nombre: fecha_evento, tipo: DATE, nulo: false}
+  - {nombre: fecha_registro, tipo: TIMESTAMP, nulo: true}
+  - {nombre: __START_AT, tipo: "STRUCT<fecha_evento: DATE, fecha_registro: TIMESTAMP>", nulo: false, regla: "Inicio de vigencia (generada por AUTO CDC)"}
+  - {nombre: __END_AT, tipo: "STRUCT<fecha_evento: DATE, fecha_registro: TIMESTAMP>", nulo: true, regla: "Fin de vigencia; NULL = versión vigente (generada por AUTO CDC)"}
+
+reglas_de_calidad:
+  - nombre: fecha_evento_no_nula
+    condicion: "fecha_evento IS NOT NULL"
+    politica: drop
+    destino_rechazos: "<catalogo>.silver.empleados_rechazos"
+    justificacion: "38 eventos sin fecha (18 + 11 + 9) no se pueden ubicar en la línea de tiempo SCD2."
+  - nombre: id_empleado_no_nulo
+    condicion: "id_empleado IS NOT NULL"
+    politica: drop
+    destino_rechazos: "<catalogo>.silver.empleados_rechazos"
+    justificacion: "id_empleado es la llave de entidad del SCD2."
+  - nombre: tipo_evento_valido
+    condicion: "tipo_evento IN ('alta', 'transferencia', 'cambio_salario', 'baja')"
+    politica: drop
+    destino_rechazos: "<catalogo>.silver.empleados_rechazos"
+    justificacion: "Un evento fuera del dominio no puede interpretarse en dotación (se normalizan 13 variantes antes de validar)."
+
+transformaciones_silver:
+  - "tipo_evento: 13 variantes -> alta, transferencia, cambio_salario, baja ('cese' -> baja)."
+  - "fecha_evento -> DATE y fecha_registro -> TIMESTAMP (formatos mixtos)."
+  - "salario: si salario > 50000 se divide entre 100.0 antes de castear a DECIMAL(12,2)."
+  - "email en minúsculas; limpieza de texto."
+  - "Column masks sobre dni y salario declarados en el schema de silver.empleados."
+  - "id_empleado como llave de entidad; no se deduplica por dni."
+  - "AUTO CDC SCD2 con sequence_by = struct(fecha_evento, fecha_registro)."
+
+problemas_conocidos:
+  - problema: "tipo_evento con 13 variantes"
+    ejemplo: "ALTA, Alta, alta, Cambio Salario, cambio_salario, cese"
+    filas_afectadas: "Todas las filas"
+    tratamiento: "Normalización a 4 valores."
+  - problema: "fecha_evento nula"
+    ejemplo: "NULL"
+    filas_afectadas: "38 (18 + 11 + 9)"
+    tratamiento: "Rechazo (fecha_evento_no_nula)."
+  - problema: "salario multiplicado por 100"
+    ejemplo: "136702.0 a 310523.0 en cargos operativos (rango normal 1,201.85 a 8,011.21)"
+    filas_afectadas: 18
+    tratamiento: "Se divide entre 100.0 cuando salario > 50000."
+  - problema: "dni nulo"
+    ejemplo: "NULL"
+    filas_afectadas: 58
+    tratamiento: "Se conserva; el DNI no es llave."
+  - problema: "dni repetido entre 2 id_empleado distintos"
+    ejemplo: "10344680, 28147179, 53661450, 61461942, 63223204, 70604481"
+    filas_afectadas: "6 DNIs"
+    tratamiento: "Se conserva id_empleado como llave de entidad sin deduplicar por DNI."
+  - problema: "Empleados cuyo alta cae en una fila con fecha_evento nula"
+    ejemplo: "12 de las 38 filas sin fecha son altas (7 transferencias, 16 cambios de salario y 3 bajas completan las 38)"
+    filas_afectadas: "12 empleados quedan sin alta en Silver"
+    tratamiento: "El alta va a empleados_rechazos y Gold dotacion_mensual solo cuenta empleados con un alta (enunciado). Una baja rechazada deja al empleado activo: se documenta como limitación."
+  - problema: "Dos eventos el mismo día para el mismo empleado"
+    ejemplo: "alta y cambio_salario el mismo día (los 38 pares son de esa combinación)"
+    filas_afectadas: 38
+    tratamiento: "Desempate por fecha_registro dentro de sequence_by (nunca coincide en los 38 pares)."
+  - problema: "Eventos de llegada tardía en el lote 3"
+    ejemplo: "fecha_evento entre 2026-06 y 2026-08 (9 en junio, 8 en julio, 46 en agosto) llegando en el último lote"
+    filas_afectadas: 63
+    tratamiento: "AUTO CDC reordena por sequence_by y recalcula las vigencias."

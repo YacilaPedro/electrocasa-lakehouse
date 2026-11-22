@@ -1,0 +1,82 @@
+fuente: tracking_envios
+version: "1.0"
+ultima_actualizacion: "2026-11-19"
+responsable: "Equipo de Ingeniería de Datos ElectroCasa"
+llegada: "Azure SQL dbo.TrackingEnvios (15,139 eventos) vía Connection de Unity Catalog"
+metodo_ingesta: "Lakeflow Connect, conector Query-Based de SQL Server (pipeline de ingesta tracking_ingestion)"
+connection_unity_catalog: "conn_azure_sql_electrocasa (variable connection_name del bundle; las credenciales viven en la Connection, no en el código)"
+cursor: "fecha_modificacion"
+modo_historia: "append_only"
+frecuencia_esperada: "Cada ejecución del job (tarea ingest_tracking) tras el COPY INTO"
+tabla_bronze: "<catalogo>.bronze.tracking_envios"
+tabla_silver: "<catalogo>.silver.tracking_envios"
+llave: [evento_id]
+
+depende_de:
+  - {fuente: ventas, columna: venta_id}
+
+columnas:
+  - {nombre: evento_id, tipo: STRING, nulo: false}
+  - {nombre: tracking_id, tipo: STRING, nulo: false}
+  - {nombre: venta_id, tipo: STRING, nulo: false}
+  - {nombre: courier, tipo: STRING, nulo: true, regla: "initcap(trim(courier))"}
+  - {nombre: estado_entrega, tipo: STRING, nulo: false, valores_permitidos: ["pendiente", "en_transito", "entregado", "devuelto"]}
+  - {nombre: sucursal_origen, tipo: STRING, nulo: true}
+  - {nombre: fecha_actualizacion, tipo: DATE, nulo: true, regla: "DATE en origen; puede ser nula"}
+  - {nombre: fecha_modificacion, tipo: TIMESTAMP, nulo: true, regla: "Cursor de ingesta y criterio de desempate"}
+  - {nombre: sucursal_venta, tipo: STRING, nulo: true, regla: "sucursal_id de la venta en silver.ventas; verificación referencial"}
+
+reglas_de_calidad:
+  - nombre: evento_id_no_nulo
+    condicion: "evento_id IS NOT NULL"
+    politica: drop
+    destino_rechazos: "<catalogo>.silver.tracking_envios_rechazos"
+    justificacion: "evento_id es la llave primaria del origen."
+  - nombre: tracking_id_no_nulo
+    condicion: "tracking_id IS NOT NULL"
+    politica: drop
+    destino_rechazos: "<catalogo>.silver.tracking_envios_rechazos"
+    justificacion: "Sin tracking_id no se puede reconstruir el recorrido del envío."
+  - nombre: venta_id_no_nulo
+    condicion: "venta_id IS NOT NULL"
+    politica: drop
+    destino_rechazos: "<catalogo>.silver.tracking_envios_rechazos"
+    justificacion: "Un envío debe poder vincularse a una venta."
+  - nombre: estado_entrega_valido
+    condicion: "estado_entrega IN ('pendiente', 'en_transito', 'entregado', 'devuelto')"
+    politica: drop
+    destino_rechazos: "<catalogo>.silver.tracking_envios_rechazos"
+    justificacion: "Un estado desconocido distorsiona las métricas de despacho."
+  - nombre: venta_existe
+    condicion: "venta_id IS NULL OR sucursal_venta IS NOT NULL"
+    politica: drop
+    destino_rechazos: "<catalogo>.silver.tracking_envios_rechazos"
+    justificacion: "Los envíos huérfanos no pertenecen a ninguna venta válida de silver.ventas."
+
+transformaciones_silver:
+  - "courier: initcap(trim(courier))."
+  - "estado_entrega: estandarización a pendiente, en_transito, entregado, devuelto ('En camino' y 'EN_CAMINO' -> en_transito)."
+  - "Eliminación de mensajes reprocesados: deduplicación por (tracking_id, estado_entrega, fecha_actualizacion) conservando el primer evento_id según fecha_modificacion."
+  - "Left join con silver.ventas para validar la existencia de venta_id (sucursal_venta)."
+
+problemas_conocidos:
+  - problema: "Mensajes reprocesados"
+    ejemplo: "Mismo (tracking_id, estado_entrega, fecha_actualizacion) con distinto evento_id"
+    filas_afectadas: "No perfilado; se mide en la validación (conteo bronze vs silver)"
+    tratamiento: "Se conserva el primer evento_id según fecha_modificacion; el resto se elimina."
+  - problema: "courier con distinta capitalización o espacios"
+    ejemplo: "Variantes de mayúsculas y espacios del nombre del courier"
+    filas_afectadas: "No perfilado"
+    tratamiento: "initcap(trim(courier))."
+  - problema: "estado_entrega con variantes o valores desconocidos"
+    ejemplo: "En camino, EN_CAMINO, en_transito"
+    filas_afectadas: "No perfilado"
+    tratamiento: "Estandarización (en camino -> en_transito); lo no reconocible se rechaza. Revisar SELECT DISTINCT estado_entrega en Bronze y completar el mapa si aparece una variante nueva."
+  - problema: "fecha_actualizacion nula"
+    ejemplo: "NULL (columna DATE nullable en origen)"
+    filas_afectadas: "No perfilado"
+    tratamiento: "Se conserva; Gold mide tiempos con fecha_modificacion. En la deduplicación un NULL cuenta como un valor más."
+  - problema: "venta_id huérfano"
+    ejemplo: "Envío cuya venta fue rechazada o no existe"
+    filas_afectadas: "No perfilado; se mide en silver.tracking_envios_rechazos"
+    tratamiento: "Rechazo (venta_existe)."

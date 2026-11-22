@@ -1,0 +1,33 @@
+bundle:
+  name: electrocasa-lakehouse
+
+variables:
+  catalog:
+    description: Catálogo de Unity Catalog donde viven bronze, silver, gold y el volume de landing.
+    default: electrocasa_dev
+  alert_email:
+    description: Correo que recibe las alertas del job. Por defecto, el usuario que despliega el bundle; se cambia con --var alert_email=<correo>.
+    default: ${workspace.current_user.userName}
+  connection_name:
+    description: Connection de Unity Catalog hacia Azure SQL (las credenciales viven en la Connection, nunca en el código).
+    default: conn_azure_sql_electrocasa
+  sql_database:
+    description: Base de datos de Azure SQL que contiene dbo.TrackingEnvios.
+    default: electrocasa
+
+include:
+  - resources/*.yml
+
+targets:
+  dev:
+    mode: development
+    default: true
+    variables:
+      catalog: electrocasa_dev
+
+  prod:
+    mode: production
+    variables:
+      catalog: electrocasa_prod
+    workspace:
+      root_path: ~/.bundle/${bundle.name}/${bundle.target}

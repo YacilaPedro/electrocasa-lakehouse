@@ -1,0 +1,118 @@
+fuente: ventas
+version: "1.0"
+ultima_actualizacion: "2026-11-19"
+responsable: "Equipo de Ingeniería de Datos ElectroCasa"
+llegada: "/Volumes/<catalogo>/default/vol_landing/ventas/ (CSV, 3 lotes: 6,783 / 6,839 / 4,618 = 18,240 filas brutas)"
+metodo_ingesta: "Auto Loader (cloudFiles, CSV con StructType explícito) en Streaming Table del pipeline"
+frecuencia_esperada: "Por lotes; el job se dispara por llegada de archivo al volume"
+tabla_bronze: "<catalogo>.bronze.ventas"
+tabla_silver: "<catalogo>.silver.ventas"
+llave: [venta_id]
+
+columnas:
+  - {nombre: venta_id, tipo: STRING, nulo: false}
+  - {nombre: sucursal_id, tipo: STRING, nulo: false}
+  - {nombre: producto_id, tipo: STRING, nulo: true}
+  - {nombre: vendedor_id, tipo: STRING, nulo: true, regla: "Nulo en canal ecommerce"}
+  - {nombre: cantidad, tipo: INT, nulo: false, regla: "cantidad > 0"}
+  - {nombre: monto_total, tipo: "DECIMAL(12,2)", nulo: false, regla: "monto_total IS NOT NULL AND monto_total > 0"}
+  - {nombre: metodo_pago, tipo: STRING, nulo: true, valores_permitidos: ["Tarjeta", "Efectivo", "Yape", "Plin", "Transferencia"]}
+  - {nombre: fecha_venta, tipo: TIMESTAMP, nulo: false}
+  - {nombre: canal, tipo: STRING, nulo: true, valores_permitidos: ["tienda_fisica", "ecommerce"]}
+  - {nombre: producto_en_catalogo, tipo: BOOLEAN, nulo: false, regla: "false cuando producto_id no existe en silver.catalogo (huérfano)"}
+  - {nombre: _source_file, tipo: STRING, nulo: true}
+  - {nombre: _batch_id, tipo: STRING, nulo: true}
+
+reglas_de_calidad:
+  - nombre: venta_id_unico
+    condicion: "row_number() OVER (PARTITION BY venta_id ORDER BY _batch_id, _source_file) = 1"
+    politica: drop
+    destino_rechazos: "<catalogo>.silver.ventas_rechazos"
+    justificacion: "240 duplicados exactos entre lotes; se conserva la primera aparición y la llave debe ser única."
+  - nombre: venta_id_no_nulo
+    condicion: "venta_id IS NOT NULL"
+    politica: drop
+    destino_rechazos: "<catalogo>.silver.ventas_rechazos"
+    justificacion: "Sin llave no se puede deduplicar ni cruzar con devoluciones y tracking."
+  - nombre: sucursal_id_no_nula
+    condicion: "sucursal_id IS NOT NULL"
+    politica: drop
+    destino_rechazos: "<catalogo>.silver.ventas_rechazos"
+    justificacion: "105 ventas sin sucursal no se pueden atribuir a ninguna sucursal en Gold."
+  - nombre: cantidad_positiva
+    condicion: "cantidad > 0"
+    politica: drop
+    destino_rechazos: "<catalogo>.silver.ventas_rechazos"
+    justificacion: "68 ventas con cantidad 0 no representan una venta real."
+  - nombre: monto_total_positivo
+    condicion: "monto_total IS NOT NULL AND monto_total > 0"
+    politica: drop
+    destino_rechazos: "<catalogo>.silver.ventas_rechazos"
+    justificacion: "152 nulos, 76 ceros y 125 negativos distorsionarían las ventas brutas."
+  - nombre: fecha_venta_valida
+    condicion: "fecha_venta IS NOT NULL"
+    politica: drop
+    destino_rechazos: "<catalogo>.silver.ventas_rechazos"
+    justificacion: "Sin fecha no se puede asignar la venta a un mes."
+  - nombre: metodo_pago_valido
+    condicion: "metodo_pago IN ('Tarjeta', 'Efectivo', 'Yape', 'Plin', 'Transferencia')"
+    politica: warn
+    destino_rechazos: "ninguno (solo métrica en el event log; la fila se conserva)"
+    justificacion: "No condiciona el monto; se observa para detectar variantes nuevas sin perder ventas."
+  - nombre: canal_valido
+    condicion: "canal IN ('tienda_fisica', 'ecommerce')"
+    politica: warn
+    destino_rechazos: "ninguno (solo métrica en el event log; la fila se conserva)"
+    justificacion: "Se observa para detectar canales nuevos sin perder ventas."
+
+transformaciones_silver:
+  - "Limpieza de texto (trim, vacío -> NULL) en llaves y atributos."
+  - "fecha_venta: parseo de 3 formatos (YYYY-MM-DD, DD/MM/YYYY, YYYY-MM-DDTHH:mm:ss) a TIMESTAMP."
+  - "monto_total: normalización de coma decimal y punto de miles (\"3.468,69\" -> 3468.69) a DECIMAL(12,2)."
+  - "cantidad: cast seguro a INT."
+  - "metodo_pago: 17 variantes -> Tarjeta, Efectivo, Yape, Plin, Transferencia."
+  - "canal: normalizado a tienda_fisica / ecommerce."
+  - "Deduplicación por venta_id (primera aparición según _batch_id y _source_file)."
+  - "producto_en_catalogo: left join contra silver.catalogo; los huérfanos se conservan para no subestimar ventas por sucursal."
+
+problemas_conocidos:
+  - problema: "Duplicados exactos entre lotes"
+    ejemplo: "18,240 filas brutas para 18,000 venta_id únicos"
+    filas_afectadas: 240
+    tratamiento: "Se conserva la primera aparición; el resto va a silver.ventas_rechazos (venta_id_unico)."
+  - problema: "fecha_venta en 3 formatos"
+    ejemplo: "09/05/2026 (DD/MM/YYYY) y 2026-05-28T21:27:45"
+    filas_afectadas: "2,140 con DD/MM/YYYY; 1,458 con T; 14,642 con YYYY-MM-DD"
+    tratamiento: "Parseo con coalesce de formatos a TIMESTAMP; la fecha con barras se interpreta siempre como día/mes/año."
+  - problema: "monto_total con coma decimal y punto de miles"
+    ejemplo: "\"3.468,69\" y \"407,98\""
+    filas_afectadas: 244
+    tratamiento: "Se normaliza a DECIMAL(12,2) antes de validar."
+  - problema: "monto_total nulo"
+    ejemplo: "NULL"
+    filas_afectadas: 152
+    tratamiento: "Rechazo (monto_total_positivo)."
+  - problema: "monto_total en cero"
+    ejemplo: "0"
+    filas_afectadas: 76
+    tratamiento: "Rechazo (monto_total_positivo)."
+  - problema: "monto_total negativo"
+    ejemplo: "-1602.5"
+    filas_afectadas: 125
+    tratamiento: "Rechazo (monto_total_positivo)."
+  - problema: "cantidad en cero"
+    ejemplo: "0"
+    filas_afectadas: 68
+    tratamiento: "Rechazo (cantidad_positiva)."
+  - problema: "sucursal_id nulo"
+    ejemplo: "NULL"
+    filas_afectadas: 105
+    tratamiento: "Rechazo (sucursal_id_no_nula)."
+  - problema: "producto_id huérfano (no existe en el catálogo)"
+    ejemplo: "PRD-91567, PRD-98305"
+    filas_afectadas: 70
+    tratamiento: "Se conservan en silver.ventas con producto_en_catalogo = false."
+  - problema: "metodo_pago con 17 variantes"
+    ejemplo: "TARJETA, tarjeta, TC, td, Tarjeta de credito, EFV, TRF, yape, Plin"
+    filas_afectadas: "Todas las filas"
+    tratamiento: "Normalización a los 5 valores permitidos."

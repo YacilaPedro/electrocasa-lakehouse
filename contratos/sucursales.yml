@@ -1,0 +1,38 @@
+fuente: sucursales
+version: "1.0"
+ultima_actualizacion: "2026-11-19"
+responsable: "Equipo de Ingeniería de Datos ElectroCasa"
+llegada: "/Volumes/<catalogo>/default/vol_landing/sucursales/ (CSV único, 40 filas)"
+metodo_ingesta: "COPY INTO (FILEFORMAT = CSV, header = true) desde la tarea SQL copy_into_bronze del job"
+frecuencia_esperada: "Dimensión estática; solo cambia al abrir o reorganizar sucursales"
+tabla_bronze: "<catalogo>.bronze.sucursales"
+tabla_silver: "<catalogo>.silver.sucursales"
+llave: [sucursal_id]
+
+columnas:
+  - {nombre: sucursal_id, tipo: STRING, nulo: false}
+  - {nombre: nombre_sucursal, tipo: STRING, nulo: true}
+  - {nombre: distrito, tipo: STRING, nulo: true}
+  - {nombre: ciudad, tipo: STRING, nulo: true, regla: "initcap(trim(ciudad))"}
+  - {nombre: region, tipo: STRING, nulo: true}
+  - {nombre: fecha_apertura, tipo: DATE, nulo: true}
+  - {nombre: _source_file, tipo: STRING, nulo: true}
+  - {nombre: _batch_id, tipo: STRING, nulo: true}
+
+reglas_de_calidad:
+  - nombre: sucursal_id_no_nulo
+    condicion: "sucursal_id IS NOT NULL"
+    politica: drop
+    destino_rechazos: "<catalogo>.silver.sucursales_rechazos"
+    justificacion: "Es la llave de la dimensión y se usa en los cruces de Gold."
+
+transformaciones_silver:
+  - "ciudad: initcap(trim(ciudad)) para corregir 'AREQUIPA' -> 'Arequipa' y 'PIURA' -> 'Piura'."
+  - "nombre_sucursal, distrito y region: solo trim (initcap dañaría 'ElectroCasa' y 'San Juan de Lurigancho')."
+  - "fecha_apertura -> DATE."
+
+problemas_conocidos:
+  - problema: "ciudad en mayúsculas"
+    ejemplo: "AREQUIPA, PIURA"
+    filas_afectadas: "2 (S27 Cercado -> Arequipa y S33 Castilla -> Piura)"
+    tratamiento: "initcap(trim(ciudad))."

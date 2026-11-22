@@ -1,0 +1,94 @@
+fuente: devoluciones
+version: "1.0"
+ultima_actualizacion: "2026-11-19"
+responsable: "Equipo de Ingeniería de Datos ElectroCasa"
+llegada: "/Volumes/<catalogo>/default/vol_landing/devoluciones/ (CSV, 3 lotes: 1,387 / 1,704 / 1,126 = 4,217 filas brutas)"
+metodo_ingesta: "Auto Loader (cloudFiles, CSV con StructType explícito) en Streaming Table del pipeline"
+frecuencia_esperada: "Por lotes; el job se dispara por llegada de archivo al volume"
+tabla_bronze: "<catalogo>.bronze.devoluciones"
+tabla_silver: "<catalogo>.silver.devoluciones"
+llave: [devolucion_id]
+
+depende_de:
+  - {fuente: ventas, columna: venta_id}
+
+columnas:
+  - {nombre: devolucion_id, tipo: STRING, nulo: false}
+  - {nombre: venta_id, tipo: STRING, nulo: false}
+  - {nombre: sucursal_id, tipo: STRING, nulo: true}
+  - {nombre: producto_id, tipo: STRING, nulo: true}
+  - {nombre: motivo, tipo: STRING, nulo: false, regla: "Nulo en origen -> 'no_especificado'"}
+  - {nombre: monto_reembolso, tipo: "DECIMAL(12,2)", nulo: false, regla: "monto_reembolso >= 0 y <= monto_total de la venta origen"}
+  - {nombre: fecha_devolucion, tipo: TIMESTAMP, nulo: true}
+  - {nombre: monto_total_venta, tipo: "DECIMAL(12,2)", nulo: true, regla: "Monto de la venta origen en silver.ventas; verificación referencial"}
+  - {nombre: _source_file, tipo: STRING, nulo: true}
+  - {nombre: _batch_id, tipo: STRING, nulo: true}
+
+reglas_de_calidad:
+  - nombre: devolucion_id_unico
+    condicion: "row_number() OVER (PARTITION BY devolucion_id ORDER BY _batch_id, _source_file) = 1"
+    politica: drop
+    destino_rechazos: "<catalogo>.silver.devoluciones_rechazos"
+    justificacion: "60 duplicados entre lotes; la llave debe ser única."
+  - nombre: devolucion_id_no_nulo
+    condicion: "devolucion_id IS NOT NULL"
+    politica: drop
+    destino_rechazos: "<catalogo>.silver.devoluciones_rechazos"
+    justificacion: "Sin llave no se puede deduplicar."
+  - nombre: monto_reembolso_no_negativo
+    condicion: "monto_reembolso IS NOT NULL AND monto_reembolso >= 0"
+    politica: drop
+    destino_rechazos: "<catalogo>.silver.devoluciones_rechazos"
+    justificacion: "38 reembolsos negativos restarían dos veces en las ventas netas."
+  - nombre: venta_id_no_nulo
+    condicion: "venta_id IS NOT NULL"
+    politica: drop
+    destino_rechazos: "<catalogo>.silver.devoluciones_rechazos"
+    justificacion: "35 devoluciones sin venta no se pueden vincular a ninguna compra."
+  - nombre: venta_existe
+    condicion: "venta_id IS NULL OR monto_total_venta IS NOT NULL"
+    politica: drop
+    destino_rechazos: "<catalogo>.silver.devoluciones_rechazos"
+    justificacion: "148 devoluciones apuntan a una venta que no está en silver.ventas: 30 no existen en el origen y 118 existen pero Silver las rechazó (monto nulo, cero o negativo; cantidad 0 o sin sucursal). Si la venta no entra en ventas brutas, su reembolso tampoco debe restar en ventas netas."
+  - nombre: reembolso_no_excede_venta
+    condicion: "monto_total_venta IS NULL OR monto_reembolso <= monto_total_venta"
+    politica: drop
+    destino_rechazos: "<catalogo>.silver.devoluciones_rechazos"
+    justificacion: "30 reembolsos mayores al monto de una venta válida son incoherentes (83 si se compara contra todas las ventas, incluidas las de monto <= 0, que ya se rechazan por venta_existe)."
+
+transformaciones_silver:
+  - "motivo nulo -> 'no_especificado' (71 filas)."
+  - "fecha_devolucion (YYYY-MM-DD) -> TIMESTAMP."
+  - "monto_reembolso -> DECIMAL(12,2)."
+  - "Left join con silver.ventas para traer monto_total_venta y validar existencia y tope del reembolso."
+  - "Deduplicación por devolucion_id."
+
+problemas_conocidos:
+  - problema: "Duplicados entre lotes"
+    ejemplo: "4,217 filas brutas para 4,157 devolucion_id únicos"
+    filas_afectadas: 60
+    tratamiento: "Se conserva la primera aparición; el resto va a silver.devoluciones_rechazos (devolucion_id_unico)."
+  - problema: "motivo nulo"
+    ejemplo: "NULL"
+    filas_afectadas: 71
+    tratamiento: "Imputación a 'no_especificado'."
+  - problema: "monto_reembolso negativo"
+    ejemplo: "monto_reembolso < 0"
+    filas_afectadas: 38
+    tratamiento: "Rechazo (monto_reembolso_no_negativo)."
+  - problema: "venta_id nulo"
+    ejemplo: "NULL"
+    filas_afectadas: 35
+    tratamiento: "Rechazo (venta_id_no_nulo)."
+  - problema: "venta_id inexistente en silver.ventas"
+    ejemplo: "venta_id que no existe en ventas, o cuya venta fue rechazada en Silver"
+    filas_afectadas: "148 (30 inexistentes + 118 sobre ventas rechazadas, de las cuales 80 por monto nulo/<=0)"
+    tratamiento: "Rechazo (venta_existe). Decisión: la devolución sigue la suerte de su venta."
+  - problema: "monto_reembolso mayor al monto de la venta origen"
+    ejemplo: "monto_reembolso > monto_total de la venta origen"
+    filas_afectadas: "30 sobre ventas válidas (83 contra todas las ventas)"
+    tratamiento: "Rechazo (reembolso_no_excede_venta) tras el join con silver.ventas."
+  - problema: "sucursal_id o producto_id de la devolución distinto al de su venta"
+    ejemplo: "sucursal distinta en 25 devoluciones y producto distinto en 17"
+    filas_afectadas: "25 / 17"
+    tratamiento: "Se respeta lo que dice la devolución: Gold ventas netas usa la sucursal de la devolución y la tasa por producto usa su producto_id."

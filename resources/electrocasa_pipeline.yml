@@ -1,0 +1,48 @@
+resources:
+  pipelines:
+    # Ingesta Query-Based de Lakeflow Connect: Azure SQL dbo.TrackingEnvios -> <catalogo>.bronze.tracking_envios
+    tracking_ingestion:
+      name: electrocasa-tracking-ingestion-${bundle.target}
+      catalog: ${var.catalog}
+      schema: bronze
+      serverless: true
+      ingestion_definition:
+        connection_name: ${var.connection_name}
+        objects:
+          - table:
+              source_catalog: ${var.sql_database}
+              source_schema: dbo
+              source_table: TrackingEnvios
+              destination_catalog: ${var.catalog}
+              destination_schema: bronze
+              destination_table: tracking_envios
+              table_configuration:
+                scd_type: APPEND_ONLY
+                include_columns:
+                  - evento_id
+                  - tracking_id
+                  - venta_id
+                  - courier
+                  - estado_entrega
+                  - sucursal_origen
+                  - fecha_actualizacion
+                  - fecha_modificacion
+                primary_keys:
+                  - evento_id
+                query_based_connector_config:
+                  cursor_columns:
+                    - fecha_modificacion
+
+    # Pipeline medallion: Auto Loader (bronze) -> limpieza y SCD2 (silver) -> 6 preguntas de negocio (gold)
+    electrocasa_medallion:
+      name: electrocasa-medallion-${bundle.target}
+      catalog: ${var.catalog}
+      schema: silver
+      serverless: true
+      continuous: false
+      root_path: ../src/electrocasa
+      libraries:
+        - glob:
+            include: ../src/electrocasa/transformations/**
+      configuration:
+        catalog_name: ${var.catalog}

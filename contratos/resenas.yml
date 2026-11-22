@@ -1,0 +1,85 @@
+fuente: resenas
+version: "1.0"
+ultima_actualizacion: "2026-11-19"
+responsable: "Equipo de Ingeniería de Datos ElectroCasa"
+llegada: "/Volumes/<catalogo>/default/vol_landing/resenas/ (JSON Lines, 2 lotes: 5,292 / 3,988 = 9,280 filas brutas)"
+metodo_ingesta: "Auto Loader (cloudFiles, JSON con StructType explícito y metadata VARIANT) en Streaming Table del pipeline"
+frecuencia_esperada: "Por lotes; el job se dispara por llegada de archivo al volume"
+tabla_bronze: "<catalogo>.bronze.resenas"
+tabla_silver: "<catalogo>.silver.resenas"
+llave: [resena_id]
+
+columnas:
+  - {nombre: resena_id, tipo: STRING, nulo: false}
+  - {nombre: producto_id, tipo: STRING, nulo: true}
+  - {nombre: cliente_id, tipo: STRING, nulo: true}
+  - {nombre: calificacion, tipo: INT, nulo: false, regla: "calificacion BETWEEN 1 AND 5"}
+  - {nombre: comentario, tipo: STRING, nulo: true, regla: "Vacío o espacios -> NULL"}
+  - {nombre: tags, tipo: "ARRAY<STRING>", nulo: false, regla: "coalesce(tags, array())"}
+  - {nombre: respuestas, tipo: "ARRAY<STRUCT<autor: STRING, texto: STRING, fecha: STRING>>", nulo: true, regla: "autor nulo -> 'sin_autor'"}
+  - {nombre: fecha_resena, tipo: TIMESTAMP, nulo: true}
+  - {nombre: metadata, tipo: VARIANT, nulo: true, regla: "Estructura según origen: app {app:{version, so}, campania?:{codigo, cupon_usado}}, web {navegador}, tienda {kiosko_id, sucursal_id}. Se consulta con try_variant_get(metadata, '$.origen', 'string')"}
+  - {nombre: producto_en_catalogo, tipo: BOOLEAN, nulo: false, regla: "false cuando producto_id no existe en silver.catalogo (huérfano)"}
+  - {nombre: _source_file, tipo: STRING, nulo: true}
+  - {nombre: _batch_id, tipo: STRING, nulo: true}
+
+reglas_de_calidad:
+  - nombre: resena_id_unico
+    condicion: "row_number() OVER (PARTITION BY resena_id ORDER BY _batch_id, _source_file) = 1"
+    politica: drop
+    destino_rechazos: "<catalogo>.silver.resenas_rechazos"
+    justificacion: "80 duplicados entre lotes; la llave debe ser única."
+  - nombre: resena_id_no_nulo
+    condicion: "resena_id IS NOT NULL"
+    politica: drop
+    destino_rechazos: "<catalogo>.silver.resenas_rechazos"
+    justificacion: "Sin llave no se puede deduplicar."
+  - nombre: calificacion_en_rango
+    condicion: "calificacion BETWEEN 1 AND 5"
+    politica: drop
+    destino_rechazos: "<catalogo>.silver.resenas_rechazos"
+    justificacion: "103 reseñas únicas con calificación 0, 6 o nula distorsionan el porcentaje de reseñas negativas."
+
+transformaciones_silver:
+  - "calificacion: cast seguro a INT."
+  - "fecha_resena: parseo de YYYY-MM-DD y DD/MM/YYYY a TIMESTAMP."
+  - "comentario: trim; vacío -> NULL (114 nulos o vacíos)."
+  - "tags: coalesce(tags, array()) (89 nulos)."
+  - "respuestas: autor nulo -> 'sin_autor' (8 elementos) mediante transform."
+  - "metadata se conserva como VARIANT."
+  - "Deduplicación por resena_id."
+  - "producto_en_catalogo: left join contra silver.catalogo; los huérfanos se conservan y Gold los excluye con INNER JOIN."
+
+problemas_conocidos:
+  - problema: "Duplicados entre lotes"
+    ejemplo: "9,280 filas brutas para 9,200 resena_id únicos"
+    filas_afectadas: 80
+    tratamiento: "Se conserva la primera aparición; el resto va a silver.resenas_rechazos (resena_id_unico)."
+  - problema: "tags nulo"
+    ejemplo: "NULL"
+    filas_afectadas: 89
+    tratamiento: "coalesce a arreglo vacío."
+  - problema: "respuestas sin autor"
+    ejemplo: "struct con autor NULL"
+    filas_afectadas: "8 elementos"
+    tratamiento: "Imputación a 'sin_autor'."
+  - problema: "fecha_resena en 2 formatos"
+    ejemplo: "YYYY-MM-DD y DD/MM/YYYY"
+    filas_afectadas: "9,200 con YYYY-MM-DD; 80 con DD/MM/YYYY"
+    tratamiento: "Parseo con coalesce de formatos."
+  - problema: "calificacion fuera de [1, 5]"
+    ejemplo: "0, 6, null"
+    filas_afectadas: "103 reseñas únicas"
+    tratamiento: "Rechazo (calificacion_en_rango)."
+  - problema: "producto_id huérfano"
+    ejemplo: "PRD-94398, PRD-99068"
+    filas_afectadas: 113
+    tratamiento: "Se conservan con producto_en_catalogo = false; Gold los excluye con INNER JOIN."
+  - problema: "comentario nulo o vacío"
+    ejemplo: "NULL o cadena vacía"
+    filas_afectadas: 114
+    tratamiento: "Se conserva la reseña con comentario NULL (la calificación es lo que usa Gold)."
+  - problema: "metadata con estructura distinta por origen"
+    ejemplo: "app: {origen, app:{version, so}} (a veces campania); web: {origen, navegador}; tienda: {origen, kiosko_id, sucursal_id}"
+    filas_afectadas: "9,280 (4,671 app con version/so, 453 con campania, 3,235 web, 1,374 tienda)"
+    tratamiento: "Se ingiere como VARIANT y se consulta con try_variant_get en Gold (resenas_por_origen_metadata)."
