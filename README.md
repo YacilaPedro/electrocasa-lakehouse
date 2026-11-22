@@ -2,7 +2,7 @@
 
 Plataforma de datos de punta a punta para ElectroCasa, una cadena de electrodomésticos con 40 sucursales en Perú. Integra seis fuentes más la tabla de sucursales en un lakehouse medallion sobre Databricks (Unity Catalog, Lakeflow Spark Declarative Pipelines, Lakeflow Connect, Lakeflow Jobs y Declarative Automation Bundles) y responde las seis preguntas de negocio de marzo a octubre de 2026.
 
-> **Estado:** ejecutado de punta a punta en Databricks Free Edition (target `dev`) con los tres lotes. Las capturas están en [`evidencias/`](evidencias/) y reunidas con su explicación en `evidencias/Evidencias_ElectroCasa_Lakehouse.docx`. Los puntos marcados con `[EVIDENCIA]` están pendientes de captura.
+> **Estado:** ejecutado de punta a punta en Databricks Free Edition (target `dev`) con los tres lotes. Las capturas están en [`evidencias/`](evidencias/) y reunidas con su explicación en `evidencias/Evidencias_ElectroCasa_Lakehouse.docx`. Solo queda pendiente la evidencia de auditoría (`system.access`), marcada con `[EVIDENCIA]`.
 
 ## 1. Caso y arquitectura
 
@@ -204,13 +204,32 @@ Las reingestas no duplican filas: tras el lote 3, `silver.ventas` tiene 17,488 `
 
 ![Error de grupos](evidencias/15_grupos_inexistentes_error.png)
 
-**Pendientes de captura:**
+**Grafo del pipeline** `electrocasa-medallion-dev` (Bronze → Silver, con tablas de rechazos → Gold, ejecución completada):
 
-* **Tracking, dos corridas del conector:** `[EVIDENCIA]` `DESCRIBE HISTORY <catalogo>.bronze.tracking_envios`: la primera corrida carga los 15,139 eventos y las siguientes no agregan filas nuevas.
-* **Grafo del pipeline:** `[EVIDENCIA]` pipeline `electrocasa-medallion` con sus tablas.
-* **Monitoreo:** `[EVIDENCIA]` consulta al event log del pipeline, por ejemplo `SELECT timestamp, event_type, message FROM event_log(TABLE(<catalogo>.silver.ventas))`, o al historial de corridas del job (ya incluido arriba). Si `system.lakeflow` o `system.billing` no están disponibles, pega aquí el error.
-* **Auditoría:** `[EVIDENCIA]` error de los `GRANT` sobre `system.access` (esperado en Free Edition) y pestaña Lineage en Catalog Explorer.
-* **Masking:** `[EVIDENCIA]` `SELECT dni, salario FROM <catalogo>.gold.empleados_vigentes` con valores reales (usuario autorizado) y enmascarados (`****NNNN` y `NULL`).
+![Grafo del pipeline](evidencias/19_pipeline_grafo.png)
+
+**Tracking con el conector query-based, dos corridas.** El historial de la tabla muestra una sola escritura de datos (la carga de los 15,139 eventos); la corrida posterior del pipeline lee 0 filas y escribe 0 bytes, y `count(*)` iguala a `count(DISTINCT evento_id)` (15,139):
+
+![Historial de bronze.tracking_envios](evidencias/20_tracking_historial.png)
+![Segunda corrida del conector](evidencias/21_tracking_segunda_corrida.png)
+
+**Monitoreo y ausencia de duplicados** (arriba, conteo contra eventos distintos; abajo, consulta al event log del pipeline):
+
+![Sin duplicados y event log](evidencias/22_tracking_sin_duplicados_y_event_log.png)
+
+**Linaje** de `gold.ventas_netas_sucursal_mes` en Catalog Explorer (se construye desde `silver.ventas` y `silver.devoluciones`):
+
+![Linaje](evidencias/23_linaje_ventas_netas.png)
+
+**Masking** de `dni` y `salario` en `silver.empleados`. En Free Edition solo hay un usuario, así que se simuló a un analista cambiando temporalmente la regla de la máscara; después se restauró antes de volver a correr el job:
+
+![Usuario autorizado](evidencias/24_masking_real.png)
+![Usuario sin autorización](evidencias/25_masking_enmascarado.png)
+![Regla restaurada](evidencias/26_masking_restaurado.png)
+
+**Pendiente de captura:**
+
+* **Auditoría:** `[EVIDENCIA]` salida de la sección 3b de `00_setup.ipynb`: los `GRANT` sobre `system.access` (o su error, esperado en Free Edition).
 
 ## 9. Retos opcionales implementados
 
