@@ -50,10 +50,10 @@ EXECUTE IMMEDIATE concat(
   'SELECT producto_id, nombre_producto, categoria, marca, precio_lista, activo, ',
   'current_timestamp() AS _ingested_at, ',
   '_metadata.file_name AS _source_file, ',
-  'coalesce(nullif(regexp_extract(_metadata.file_name, ''([0-9]{4}-[0-9]{2}-[0-9]{2})'', 1), ''''), date_format(_metadata.file_modification_time, ''yyyy-MM-dd'')) AS _batch_id ',
-  'FROM ''/Volumes/', v_catalog, '/default/vol_landing/catalogo/'') ',
+  'coalesce(nullif(regexp_extract(_metadata.file_name, \'([0-9]{4}-[0-9]{2}-[0-9]{2})\', 1), \'\'), date_format(_metadata.file_modification_time, \'yyyy-MM-dd\')) AS _batch_id ',
+  'FROM \'/Volumes/', v_catalog, '/default/vol_landing/catalogo/\') ',
   'FILEFORMAT = JSON ',
-  'FORMAT_OPTIONS (''multiLine'' = ''true'', ''primitivesAsString'' = ''true'')'
+  'FORMAT_OPTIONS (\'multiLine\' = \'true\', \'primitivesAsString\' = \'true\')'
 );
 
 -- COMMAND ----------
@@ -64,10 +64,10 @@ EXECUTE IMMEDIATE concat(
   'SELECT sucursal_id, nombre_sucursal, distrito, ciudad, region, fecha_apertura, ',
   'current_timestamp() AS _ingested_at, ',
   '_metadata.file_name AS _source_file, ',
-  'coalesce(nullif(regexp_extract(_metadata.file_name, ''([0-9]{4}-[0-9]{2}-[0-9]{2})'', 1), ''''), date_format(_metadata.file_modification_time, ''yyyy-MM-dd'')) AS _batch_id ',
-  'FROM ''/Volumes/', v_catalog, '/default/vol_landing/sucursales/'') ',
+  'coalesce(nullif(regexp_extract(_metadata.file_name, \'([0-9]{4}-[0-9]{2}-[0-9]{2})\', 1), \'\'), date_format(_metadata.file_modification_time, \'yyyy-MM-dd\')) AS _batch_id ',
+  'FROM \'/Volumes/', v_catalog, '/default/vol_landing/sucursales/\') ',
   'FILEFORMAT = CSV ',
-  'FORMAT_OPTIONS (''header'' = ''true'', ''inferSchema'' = ''false'')'
+  'FORMAT_OPTIONS (\'header\' = \'true\', \'inferSchema\' = \'false\')'
 );
 
 -- COMMAND ----------

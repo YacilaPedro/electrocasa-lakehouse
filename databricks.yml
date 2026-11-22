@@ -13,7 +13,7 @@ variables:
     default: conn_azure_sql_electrocasa
   sql_database:
     description: Base de datos de Azure SQL que contiene dbo.TrackingEnvios.
-    default: electrocasa
+    default: electrocasadb
 
 include:
   - resources/*.yml
